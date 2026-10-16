@@ -27,7 +27,8 @@ jobs:
           dockerfile: tests/client.Dockerfile
 
       - name: Shell scripts
-        run: shellcheck entrypoint.sh tests/e2e.sh
+        # pinned: the runner's packaged shellcheck is older and reports differently
+        run: docker run --rm -v "$PWD:/w" -w /w koalaman/shellcheck:v0.11.0 entrypoint.sh tests/e2e.sh
 
       - name: Workflows
         uses: raven-actions/actionlint@v2
