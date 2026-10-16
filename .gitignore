@@ -1,0 +1,10 @@
+# local compose state
+/etc/
+/lib/
+/logs/
+/backups/
+
+# personal drafts
+/draft-*/
+
+.DS_Store

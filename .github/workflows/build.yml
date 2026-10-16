@@ -1,0 +1,176 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    # weekly rebuild: picks up new PBS releases and Debian security updates
+    - cron: "23 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build
+  cancel-in-progress: false
+
+env:
+  IMAGE: fastiuk/proxmox-backup-server
+  PACKAGES_URL: http://download.proxmox.com/debian/pbs/dists/trixie/pbs-no-subscription/binary-amd64/Packages.gz
+
+jobs:
+  version:
+    name: Resolve PBS version
+    runs-on: ubuntu-24.04
+    outputs:
+      full: ${{ steps.v.outputs.full }}
+      upstream: ${{ steps.v.outputs.upstream }}
+    steps:
+      - id: v
+        run: |
+          full=$(curl -fsSL "$PACKAGES_URL" | gunzip \
+            | awk '/^Package: proxmox-backup-server$/{f=1} f&&/^Version:/{print $2; f=0}' \
+            | sort -V | tail -1)
+          if [ -z "$full" ]; then echo "::error::no proxmox-backup-server in $PACKAGES_URL"; exit 1; fi
+          echo "full=$full" >>"$GITHUB_OUTPUT"
+          echo "upstream=${full%%-*}" >>"$GITHUB_OUTPUT"
+          echo "### Proxmox Backup Server \`$full\`" >>"$GITHUB_STEP_SUMMARY"
+
+  build:
+    name: Build ${{ matrix.platform }}
+    needs: version
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+          # Proxmox publishes PBS for amd64 only (see README "Architectures").
+          # - platform: linux/arm64
+          #   runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Labels
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.IMAGE }}
+          labels: |
+            org.opencontainers.image.title=Proxmox Backup Server
+            org.opencontainers.image.description=Proxmox Backup Server from the official Proxmox repository, running without systemd
+            org.opencontainers.image.version=${{ needs.version.outputs.full }}
+
+      - name: Build for testing
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          build-args: PBS_VERSION=${{ needs.version.outputs.full }}
+          labels: ${{ steps.meta.outputs.labels }}
+          load: true
+          tags: pbs:test
+          cache-from: type=gha,scope=${{ matrix.platform }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.platform }}
+
+      - name: End-to-end test
+        run: tests/e2e.sh pbs:test
+
+      - uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Push by digest
+        id: push
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          build-args: PBS_VERSION=${{ needs.version.outputs.full }}
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ matrix.platform }}
+          provenance: mode=max
+          sbom: true
+
+      - name: Export digest
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/digests"
+          touch "$RUNNER_TEMP/digests/${DIGEST#sha256:}"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: digests-${{ strategy.job-index }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish tags
+    needs: [version, build]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Tags
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=raw,value=latest
+            type=raw,value=${{ needs.version.outputs.full }}
+            type=semver,pattern={{version}},value=${{ needs.version.outputs.upstream }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ needs.version.outputs.upstream }}
+            type=semver,pattern={{major}},value=${{ needs.version.outputs.upstream }}
+
+      - name: Create multi-arch manifest
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          mapfile -t tags < <(jq -r '.tags[]' <<<"$DOCKER_METADATA_OUTPUT_JSON")
+          args=()
+          for t in "${tags[@]}"; do args+=(-t "$t"); done
+          for d in *; do args+=("$IMAGE@sha256:$d"); done
+          docker buildx imagetools create "${args[@]}"
+
+      - name: Inspect
+        run: |
+          docker buildx imagetools inspect "$IMAGE:latest"
+          {
+            echo "### Published"
+            jq -r '.tags[] | "- `" + . + "`"' <<<"$DOCKER_METADATA_OUTPUT_JSON"
+          } >>"$GITHUB_STEP_SUMMARY"
+
+  dockerhub-readme:
+    name: Docker Hub description
+    needs: publish
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: peter-evans/dockerhub-description@v5
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          repository: ${{ env.IMAGE }}
+          short-description: Proxmox Backup Server from official Proxmox packages, no systemd, e2e-tested
+          readme-filepath: ./README.md
+          enable-url-completion: true

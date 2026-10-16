@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Dockerfile
+        uses: hadolint/hadolint-action@v3.5.0
+        with:
+          dockerfile: Dockerfile
+
+      - name: Test client Dockerfile
+        uses: hadolint/hadolint-action@v3.5.0
+        with:
+          dockerfile: tests/client.Dockerfile
+
+      - name: Shell scripts
+        run: shellcheck entrypoint.sh tests/e2e.sh
+
+      - name: Workflows
+        uses: raven-actions/actionlint@v2
+
+      - name: Compose file
+        run: docker compose -f compose.yaml config --quiet

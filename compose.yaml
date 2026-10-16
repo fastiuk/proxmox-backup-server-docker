@@ -1,0 +1,23 @@
+services:
+  pbs:
+    image: fastiuk/proxmox-backup-server:latest
+    # build: .                      # or build the image yourself
+    container_name: pbs
+    hostname: pbs
+    restart: unless-stopped
+    # tini as PID 1: reaps zombies and forwards signals to entrypoint.sh
+    init: true
+    ports:
+      - "8007:8007"
+    environment:
+      TZ: Etc/UTC
+      # Creates admin@pbs on the first start (min. 8 characters). Remove it afterwards.
+      # PBS_ADMIN_PASSWORD: change-me-now
+    tmpfs:
+      - /run
+    volumes:
+      - ./etc:/etc/proxmox-backup
+      - ./lib:/var/lib/proxmox-backup
+      - ./logs:/var/log/proxmox-backup
+      # datastores live below this path, e.g. /backups/store
+      - ./backups:/backups
