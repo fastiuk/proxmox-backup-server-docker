@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # End-to-end test of a built image: first-run admin, web login, datastore, backup and restore
-# over the network with proxmox-backup-client, GC and verify, restart persistence, healthcheck
-# and graceful shutdown.
+# over the network with proxmox-backup-client, GC and verify, restart persistence, healthcheck,
+# graceful shutdown, and first start with a DNS search domain too long for the certificate name.
 #
 # usage: tests/e2e.sh <image>
 set -euo pipefail
@@ -10,6 +10,7 @@ IMAGE=${1:?usage: tests/e2e.sh <image>}
 HERE=$(cd "$(dirname "$0")" && pwd)
 RUN_ID=pbs-e2e-$$
 SERVER=$RUN_ID-server
+LONG=$RUN_ID-longdns
 CLIENT_IMAGE=pbs-e2e-client:local
 # named volumes, not bind mounts: Docker Desktop bind mounts ignore chown, which PBS relies on
 VOLUMES=(etc lib logs backups restore)
@@ -29,7 +30,7 @@ cleanup() {
         echo "--- server log (tail) ---" >&2
         docker logs "$SERVER" 2>&1 | tail -40 >&2 || true
     fi
-    docker rm -f "$SERVER" >/dev/null 2>&1 || true
+    docker rm -fv "$SERVER" "$LONG" >/dev/null 2>&1 || true
     docker network rm "$RUN_ID" >/dev/null 2>&1 || true
     for v in "${VOLUMES[@]}"; do docker volume rm "$RUN_ID-$v" >/dev/null 2>&1 || true; done
     rm -rf "$WORK"
@@ -49,11 +50,13 @@ client() {
 }
 
 wait_ready() {
+    local name=${1:-$SERVER}
     for _ in $(seq 60); do
-        docker exec "$SERVER" curl -fsk -o /dev/null https://127.0.0.1:8007/ 2>/dev/null && return 0
+        docker exec "$name" curl -fsk -o /dev/null https://127.0.0.1:8007/ 2>/dev/null && return 0
         sleep 2
     done
-    fail "PBS did not answer on :8007"
+    docker logs "$name" 2>&1 | tail -20 >&2
+    fail "PBS in $name did not answer on :8007"
 }
 
 login_ok() {
@@ -75,7 +78,9 @@ step "start server"
 mkdir -p "$WORK/data"
 docker network create "$RUN_ID" >/dev/null
 for v in "${VOLUMES[@]}"; do docker volume create "$RUN_ID-$v" >/dev/null; done
+# short, fixed DNS search domain: PBS creates its own certificate (see the long-domain case below)
 docker run -d --name "$SERVER" --network "$RUN_ID" --init --tmpfs /run \
+    --hostname pbs-e2e --dns-search example.com \
     -e TZ=Europe/Kyiv -e PBS_ADMIN_PASSWORD="$PASSWORD" \
     -v "$RUN_ID-etc:/etc/proxmox-backup" \
     -v "$RUN_ID-lib:/var/lib/proxmox-backup" \
@@ -142,5 +147,14 @@ step "graceful stop"
 docker stop -t 30 "$SERVER" >/dev/null
 code=$(docker inspect -f '{{.State.ExitCode}}' "$SERVER")
 [ "$code" = 0 ] || fail "container exited with $code on SIGTERM"
+
+step "starts with a DNS search domain too long for the certificate name"
+docker run -d --name "$LONG" --init --tmpfs /run --hostname pbs-e2e-long \
+    --dns-search "averyveryveryverylongsearchdomain.bx.internal.cloudapp.example" \
+    "$IMAGE" >/dev/null
+wait_ready "$LONG"
+contains 'CN *= *pbs-e2e-long' \
+    "$(docker exec "$LONG" openssl x509 -in /etc/proxmox-backup/proxy.pem -noout -subject)" \
+    || fail "certificate is not issued for the bare hostname"
 
 printf '\nALL E2E TESTS PASSED\n'

@@ -10,7 +10,7 @@ ARG KEYRING_SHA256=136673be77aba35dcce385b28737689ad64fd785a797e57897589aed08db6
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates curl tzdata \
+ && apt-get install -y --no-install-recommends ca-certificates curl openssl tzdata \
  && curl -fsSL -o /usr/share/keyrings/proxmox-archive-keyring.gpg \
       https://enterprise.proxmox.com/debian/proxmox-archive-keyring-trixie.gpg \
  && echo "${KEYRING_SHA256}  /usr/share/keyrings/proxmox-archive-keyring.gpg" | sha256sum -c - \

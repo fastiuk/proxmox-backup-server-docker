@@ -76,6 +76,11 @@ Port `8007/tcp` serves the web UI, the API and backup traffic over HTTPS.
 > **Docker Desktop (macOS/Windows):** bind mounts there ignore `chown`, and PBS refuses to start
 > unless its directories belong to the `backup` user. Use named volumes instead of host paths.
 
+On first start PBS creates a self-signed certificate named `<hostname>.<DNS search domain>`.
+Certificate names are limited to 64 characters, which long search domains (common on cloud VMs)
+exceed; the entrypoint then issues the certificate for the bare hostname instead. Setting a short
+`hostname` (as in `compose.yaml`) is a good idea either way.
+
 ## Create a datastore
 
 In the web UI: **Datastore → Add Datastore**, path `/backups/store`. Or from the shell:
