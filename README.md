@@ -10,6 +10,9 @@
 [![Debian](https://img.shields.io/badge/base-Debian%20trixie-A81D33?logo=debian&logoColor=white)](https://www.debian.org/releases/trixie/)
 [![License](https://img.shields.io/github/license/fastiuk/proxmox-backup-server-docker)](LICENSE)
 
+**Source:** [github.com/fastiuk/proxmox-backup-server-docker](https://github.com/fastiuk/proxmox-backup-server-docker) ·
+**Image:** [hub.docker.com/r/fastiuk/proxmox-backup-server](https://hub.docker.com/r/fastiuk/proxmox-backup-server)
+
 [Proxmox Backup Server](https://www.proxmox.com/en/products/proxmox-backup-server/overview) (PBS)
 as a Docker image, built from the **official Proxmox package repository** and running
 **without systemd**. Useful on a NAS (Synology, Unraid, TrueNAS SCALE, …) or any Docker host
@@ -23,18 +26,21 @@ where a bare-metal or VM install of PBS is not an option.
   and `proxmox-backup-proxy` as the `backup` user, exactly like the upstream systemd units do.
 - **Tested before it ships.** Every image passes an [end-to-end test](tests/e2e.sh) before it is
   pushed: web login, datastore creation, backup and restore through `proxmox-backup-client`,
-  garbage collection, verify, restart persistence, healthcheck and graceful shutdown.
+  garbage collection, verify, restart persistence, healthcheck and graceful shutdown — all with
+  reduced container privileges.
 - **Always current.** Rebuilt on every push and weekly, picking up new PBS releases and Debian
   security updates. Tags follow the PBS version.
-- **Batteries included.** Healthcheck, clean `SIGTERM` handling, optional first-run admin account,
-  SBOM and provenance attestations.
+- **Locked down.** Runs with `no-new-privileges` and a minimal capability set, takes the first admin
+  password from a Docker secret, and every GitHub Action and lint image is pinned by digest.
+- **Batteries included.** Healthcheck, clean `SIGTERM` handling, SBOM attestation.
 
 ## Quick start
 
 ```bash
 mkdir pbs && cd pbs
 curl -fsSLO https://raw.githubusercontent.com/fastiuk/proxmox-backup-server-docker/main/compose.yaml
-# edit compose.yaml: set PBS_ADMIN_PASSWORD for the first start and the datastore volume
+# first start only: a password for admin@pbs, and uncomment the secret lines in compose.yaml
+(umask 077; read -rsp 'admin@pbs password: ' pw && echo "$pw" > pbs_admin_password.txt)
 docker compose up -d
 ```
 
@@ -42,9 +48,13 @@ Or with plain `docker run`:
 
 ```bash
 docker run -d --name pbs --init --restart unless-stopped \
+  --security-opt no-new-privileges:true --cap-drop ALL \
+  --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER --cap-add SETUID --cap-add SETGID \
+  --cap-add NET_BIND_SERVICE --cap-add KILL \
   -p 8007:8007 --tmpfs /run \
   -e TZ=Europe/Berlin \
-  -e PBS_ADMIN_PASSWORD='change-me-now' \
+  -e PBS_ADMIN_PASSWORD_FILE=/run/secrets/pbs_admin_password \
+  -v "$PWD/pbs_admin_password.txt:/run/secrets/pbs_admin_password:ro" \
   -v pbs-etc:/etc/proxmox-backup \
   -v pbs-lib:/var/lib/proxmox-backup \
   -v pbs-logs:/var/log/proxmox-backup \
@@ -53,8 +63,8 @@ docker run -d --name pbs --init --restart unless-stopped \
 ```
 
 Open `https://<host>:8007` and log in as **`admin`** with the realm
-**Proxmox Backup authentication server**. Afterwards remove `PBS_ADMIN_PASSWORD`; the account
-stays in `/etc/proxmox-backup`.
+**Proxmox Backup authentication server**. The account now lives in `/etc/proxmox-backup`: remove the
+secret from the configuration and delete `pbs_admin_password.txt`.
 
 ## Configuration
 
@@ -69,7 +79,8 @@ stays in `/etc/proxmox-backup`.
 | Variable | Default | Description |
 |---|---|---|
 | `TZ` | `UTC` | time zone used for GC, prune, verify and sync schedules |
-| `PBS_ADMIN_PASSWORD` | – | on start, creates `admin@pbs` with the `Admin` role if it does not exist yet (at least 8 characters); the daemons never see it |
+| `PBS_ADMIN_PASSWORD_FILE` | – | file (e.g. a Docker secret) with the password for `admin@pbs`, created with the `Admin` role on start if it does not exist yet (at least 8 characters) |
+| `PBS_ADMIN_PASSWORD` | – | the same as a plain variable; it stays visible in `docker inspect`, so prefer the file. The daemons never see either |
 
 Port `8007/tcp` serves the web UI, the API and backup traffic over HTTPS.
 
@@ -113,6 +124,26 @@ In Proxmox VE: **Datacenter → Storage → Add → Proxmox Backup Server**, use
 the token secret as password and the fingerprint from above. Since the token cannot delete
 backups, leave retention to the PBS prune job. Client-side encryption can be enabled on the
 same dialog; store the key somewhere outside the PVE host.
+
+## Security
+
+PBS holds the keys to all your backups, so treat it as the most sensitive host on the network:
+
+- **Keep port 8007 off the internet.** Publish it on a LAN address only (`192.0.2.10:8007:8007`)
+  and use a VPN for remote access.
+- **Least privilege for clients.** Give Proxmox VE a `DatastoreBackup` token (see above): it can
+  add and restore backups but cannot delete them.
+- **Two-factor login** for `admin@pbs`: **Access Control → Two Factor Authentication** (TOTP or WebAuthn).
+- **Client-side encryption** in Proxmox VE, so the server only ever stores encrypted chunks. Keep
+  the key somewhere other than the PVE host.
+- **Protect `/etc/proxmox-backup`.** It holds the server's private keys and the user database.
+- **Container privileges.** The examples above and `compose.yaml` run with `no-new-privileges` and
+  only `CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `SETUID`, `SETGID`, `NET_BIND_SERVICE` and `KILL`; CI tests
+  exactly that. As upstream, the API daemon runs as root inside the container, the proxy as `backup`.
+- **Supply chain.** PBS comes from the official Proxmox repository with the keyring pinned by sha256.
+  GitHub Actions are pinned by commit SHA, lint tools by image digest, and the workflows are audited
+  with [zizmor](https://github.com/zizmorcore/zizmor). Images carry an SBOM; build provenance is off
+  because in GitHub Actions it would embed the push event, including committer e-mail addresses.
 
 ## Updating
 
@@ -183,9 +214,9 @@ them when it finishes.
 
 | Workflow | Runs on | What it does |
 |---|---|---|
-| [CI](.github/workflows/ci.yml) | push, PR | hadolint, shellcheck, actionlint, compose validation |
+| [CI](.github/workflows/ci.yml) | push, PR | hadolint, shellcheck, actionlint, zizmor (workflow security), compose validation |
 | [Tests](.github/workflows/test.yml) | push, PR | builds the image and runs the end-to-end test |
-| [Build](.github/workflows/build.yml) | `main`, weekly, manual | resolves the newest PBS version, builds, tests, pushes by digest, creates the multi-arch manifest and tags, syncs this README to Docker Hub |
+| [Build](.github/workflows/build.yml) | `main` only: push, weekly, manual | resolves the newest PBS version, builds, tests, pushes by digest, creates the multi-arch manifest and tags, syncs this README to Docker Hub |
 
 ## License
 
