@@ -13,7 +13,9 @@ chmod 700 /etc/proxmox-backup
 # at most 64 characters; long search domains (cloud VMs, CI runners) make the API fail on first
 # start. In that case create the certificate here with the bare hostname; PBS keeps an existing one.
 if [ ! -e /etc/proxmox-backup/proxy.pem ]; then
-    host=$(hostname)
+    # keep only hostname characters, so nothing else can reach the openssl subject
+    host=$(hostname | tr -cd 'A-Za-z0-9.-')
+    host=${host:-pbs}
     search=$(awk '$1 == "search" { $1 = ""; sub(/^ +/, ""); print; exit }' /etc/resolv.conf 2>/dev/null || true)
     cn=$host${search:+.$search}
     if [ "${#cn}" -gt 64 ]; then
@@ -27,14 +29,18 @@ if [ ! -e /etc/proxmox-backup/proxy.pem ]; then
     fi
 fi
 
-# Optional first-run admin: create admin@pbs once, then keep the password out of the daemons' env.
+# Optional first-run admin: create admin@pbs once from PBS_ADMIN_PASSWORD_FILE (a Docker secret,
+# preferred) or PBS_ADMIN_PASSWORD, then keep the password out of the daemons' environment.
+if [ -n "${PBS_ADMIN_PASSWORD_FILE:-}" ]; then
+    PBS_ADMIN_PASSWORD=$(<"$PBS_ADMIN_PASSWORD_FILE")
+fi
 if [ -n "${PBS_ADMIN_PASSWORD:-}" ] && ! grep -qx 'user: admin@pbs' /etc/proxmox-backup/user.cfg 2>/dev/null; then
     proxmox-backup-manager user create admin@pbs --password "$PBS_ADMIN_PASSWORD" \
-        --comment "created from PBS_ADMIN_PASSWORD" >/dev/null
+        --comment "created on first start" >/dev/null
     proxmox-backup-manager acl update / Admin --auth-id admin@pbs
-    echo "created admin@pbs from PBS_ADMIN_PASSWORD" >&2
+    echo "created admin@pbs" >&2
 fi
-unset PBS_ADMIN_PASSWORD
+unset PBS_ADMIN_PASSWORD PBS_ADMIN_PASSWORD_FILE
 
 api=""
 proxy=""

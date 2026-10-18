@@ -7,12 +7,29 @@ services:
     restart: unless-stopped
     # tini as PID 1: reaps zombies and forwards signals to entrypoint.sh
     init: true
+    # least privilege: no privilege escalation and only the capabilities PBS needs
+    # (CI runs the end-to-end test with exactly these settings)
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETUID
+      - SETGID
+      - NET_BIND_SERVICE
+      - KILL
     ports:
+      # publish on a LAN address only (e.g. "192.0.2.10:8007:8007") if the host is reachable from the internet
       - "8007:8007"
     environment:
       TZ: Etc/UTC
-      # Creates admin@pbs on the first start (min. 8 characters). Remove it afterwards.
-      # PBS_ADMIN_PASSWORD: change-me-now
+      # First start only: creates admin@pbs from the secret below. Remove both afterwards.
+      # PBS_ADMIN_PASSWORD_FILE: /run/secrets/pbs_admin_password
+    # secrets:
+    #   - pbs_admin_password
     tmpfs:
       - /run
     volumes:
@@ -21,3 +38,7 @@ services:
       - ./logs:/var/log/proxmox-backup
       # datastores live below this path, e.g. /backups/store
       - ./backups:/backups
+
+# secrets:
+#   pbs_admin_password:
+#     file: ./pbs_admin_password.txt   # one line, at least 8 characters, chmod 600
