@@ -1,0 +1,6 @@
+rules:
+  secrets-outside-env:
+    # Accepted: the Docker Hub credentials stay repository secrets. They are only used by
+    # build.yml, which runs on main (push, schedule, dispatch) and refuses other refs;
+    # pull requests, including forks, never receive them.
+    disable: true

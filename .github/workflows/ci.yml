@@ -9,29 +9,37 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Linters run from images pinned by digest, so CI and local runs use the same versions.
+env:
+  HADOLINT: hadolint/hadolint:v2.15.1@sha256:32dac94127fd60b7b7e3fbfc65e1383b9b5e25c9bfd7b8536de7a539fe68a12d
+  SHELLCHECK: koalaman/shellcheck:v0.11.0@sha256:61862eba1fcf09a484ebcc6feea46f1782532571a34ed51fedf90dd25f925a8d
+  ACTIONLINT: rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
+  ZIZMOR: ghcr.io/zizmorcore/zizmor:1.31.1@sha256:42d409dbb851d4c5d35a058cf042b828bea1e3f2884378c526eb0974780e18d9
+
 jobs:
   lint:
     name: Lint
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
-
-      - name: Dockerfile
-        uses: hadolint/hadolint-action@v3.5.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          dockerfile: Dockerfile
+          persist-credentials: false
 
-      - name: Test client Dockerfile
-        uses: hadolint/hadolint-action@v3.5.0
-        with:
-          dockerfile: tests/client.Dockerfile
+      - name: Dockerfiles
+        run: docker run --rm -v "$PWD:/w" -w /w "$HADOLINT" hadolint Dockerfile tests/client.Dockerfile
 
       - name: Shell scripts
-        # pinned: the runner's packaged shellcheck is older and reports differently
-        run: docker run --rm -v "$PWD:/w" -w /w koalaman/shellcheck:v0.11.0 entrypoint.sh tests/e2e.sh
+        run: docker run --rm -v "$PWD:/w" -w /w "$SHELLCHECK" entrypoint.sh tests/e2e.sh
 
       - name: Workflows
-        uses: raven-actions/actionlint@v2
+        run: docker run --rm -v "$PWD:/repo" -w /repo "$ACTIONLINT" -color
+
+      - name: Workflow security
+        run: docker run --rm -v "$PWD:/repo" -w /repo "$ZIZMOR" --offline --persona=auditor --config .github/zizmor.yml .github/workflows
 
       - name: Compose file
         run: docker compose -f compose.yaml config --quiet
